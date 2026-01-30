@@ -8,15 +8,9 @@ def get_pair_via_dtw(template, query, step_pattern="symmetric2", verbose=False):
     
     # Need at least 2 elements to compute diff
     if len(template) < 2 or len(query) < 2:
-        # Return trivial pairing for single elements
-        if len(template) == 1 and len(query) == 1:
-            return [(0, 0), (1, 1)]
-        elif len(template) == 1:
-            return [(0, 0)] + [(1, i+1) for i in range(len(query))]
-        elif len(query) == 1:
-            return [(i, 0) for i in range(len(template))] + [(len(template), 1)]
-        else:
-            return []
+        # Return empty list for insufficient data
+        # The diff-based DTW requires at least 2 points
+        return []
     
     template = np.diff(template)
     query = np.diff(query)
@@ -125,8 +119,15 @@ def get_paired_ephys_event_index(task_ephys_dtw_pairs, conservative=False):
 
     return final_numpy_array
 
+# Constants for chunk processing
+MAX_OVERLAP = 5  # Maximum overlap between chunks to ensure continuity
+OVERLAP_RATIO = 0.1  # 10% of chunk_size as overlap
+RETRY_GROWTH_FACTOR = 1.5  # Increase chunk size by 50% per retry
+VALIDATION_TOLERANCE_RATIO = 0.1  # Allow 10% inconsistent intervals
+
+
 def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01, 
-                              step_pattern="symmetric2", verbose=False, max_iterations=3):
+                              step_pattern="symmetric2", verbose=False, max_attempts=3):
     """
     Minimal pair method for DTW alignment with chunked processing.
     
@@ -144,7 +145,9 @@ def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01,
         tolerance (float): Tolerance for interval consistency check. Default: 0.01
         step_pattern (str): DTW step pattern. Default: "symmetric2"
         verbose (bool): Whether to print detailed information. Default: False
-        max_iterations (int): Maximum number of re-pairing attempts per chunk. Default: 3
+        max_attempts (int): Maximum total number of attempts per chunk (including initial).
+                           For example, max_attempts=3 means 1 initial attempt + 2 retries.
+                           Default: 3
         
     Returns:
         list: List of paired indices in format [(template_idx, query_idx), ...]
@@ -172,6 +175,11 @@ def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01,
         template_end = min(template_offset + chunk_size, len(template))
         query_end = min(query_offset + chunk_size, len(query))
         
+        # Ensure we have enough data for DTW (need at least 2 points)
+        if template_end - template_offset < 2 or query_end - query_offset < 2:
+            # Not enough data, skip to end
+            break
+        
         # Extract chunks
         template_chunk = template[template_offset:template_end]
         query_chunk = query[query_offset:query_end]
@@ -180,68 +188,87 @@ def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01,
             print(f"\nProcessing chunk: template[{template_offset}:{template_end}], query[{query_offset}:{query_end}]")
         
         # Perform DTW on chunk with retry logic
-        iteration = 0
+        attempt = 0
         chunk_valid = False
         current_chunk_size = chunk_size
         chunk_pairs = []
         
-        while iteration < max_iterations and not chunk_valid:
+        while attempt < max_attempts and not chunk_valid:
             # Adjust chunk size for retry - increase size to get better context
-            if iteration > 0:
-                # Increase chunk size by 50% for each retry
+            if attempt > 0:
+                # Increase chunk size by RETRY_GROWTH_FACTOR for each retry
                 current_chunk_size = min(
-                    int(chunk_size * (1.5 ** iteration)), 
+                    int(chunk_size * (RETRY_GROWTH_FACTOR ** attempt)), 
                     len(template) - template_offset, 
                     len(query) - query_offset
                 )
                 template_end = min(template_offset + current_chunk_size, len(template))
                 query_end = min(query_offset + current_chunk_size, len(query))
+                
+                # Check if we still have enough data
+                if template_end - template_offset < 2 or query_end - query_offset < 2:
+                    break
+                    
                 template_chunk = template[template_offset:template_end]
                 query_chunk = query[query_offset:query_end]
                 
                 if verbose:
-                    print(f"  Retry {iteration}: Adjusting chunk size to {current_chunk_size}")
+                    print(f"  Retry {attempt}: Adjusting chunk size to {current_chunk_size}")
             
             # Get pairs for this chunk
             chunk_pairs = get_pair_via_dtw(template_chunk, query_chunk, step_pattern, verbose=False)
             
-            # Validate chunk pairs
-            chunk_valid = _validate_pairs(template_chunk, query_chunk, chunk_pairs, tolerance)
+            # Validate chunk pairs if we got any
+            if len(chunk_pairs) > 0:
+                chunk_valid = _validate_pairs(template_chunk, query_chunk, chunk_pairs, tolerance)
             
             if verbose:
                 if chunk_valid:
                     print(f"  Validation passed with {len(chunk_pairs)} pairs")
+                elif len(chunk_pairs) == 0:
+                    print(f"  No pairs found for chunk (attempt {attempt + 1})")
                 else:
-                    print(f"  Validation failed (iteration {iteration + 1})")
+                    print(f"  Validation failed (attempt {attempt + 1})")
             
-            iteration += 1
+            attempt += 1
         
-        if not chunk_valid and verbose:
-            print(f"  Warning: Using result after {max_iterations} validation attempts")
+        if not chunk_valid and verbose and len(chunk_pairs) > 0:
+            print(f"  Warning: Using result after {max_attempts} validation attempts")
         
-        # Adjust indices to global coordinates and add to results
-        # For the first chunk, add all pairs
-        # For subsequent chunks, skip the first pair to avoid duplicates at boundaries
-        start_idx = 1 if len(all_pairs) > 0 else 0
-        
-        for i, j in chunk_pairs[start_idx:]:
-            global_i = template_offset + i
-            global_j = query_offset + j
-            all_pairs.append((global_i, global_j))
-        
-        # Update offsets for next iteration
-        # Move forward based on the last matched index in the chunk
+        # Only process pairs if we got some
         if len(chunk_pairs) > 0:
+            # Adjust indices to global coordinates and add to results
+            # For the first chunk, add all pairs
+            # For subsequent chunks, skip the first pair to avoid duplicates at boundaries
+            start_idx = 1 if len(all_pairs) > 0 else 0
+            
+            for i, j in chunk_pairs[start_idx:]:
+                global_i = template_offset + i
+                global_j = query_offset + j
+                all_pairs.append((global_i, global_j))
+            
+            # Update offsets for next iteration
+            # Move forward based on the last matched index in the chunk
             last_template_idx, last_query_idx = chunk_pairs[-1]
             
             # Move forward but leave a small overlap to ensure continuity
-            overlap = min(5, chunk_size // 10)
-            template_offset += max(1, last_template_idx - overlap + 1)
-            query_offset += max(1, last_query_idx - overlap + 1)
+            overlap = min(MAX_OVERLAP, int(chunk_size * OVERLAP_RATIO))
+            
+            # Ensure we make progress by at least 1 element
+            # Add 1 to convert from index to count, then subtract overlap
+            template_step = max(1, last_template_idx + 1 - overlap)
+            query_step = max(1, last_query_idx + 1 - overlap)
+            
+            template_offset += template_step
+            query_offset += query_step
         else:
-            # If no pairs found (shouldn't happen), move forward by 1
-            template_offset += 1
-            query_offset += 1
+            # If no pairs found even after retries, skip this region
+            # Move forward by a small amount to avoid infinite loop
+            template_offset += max(1, min(10, chunk_size // 5))
+            query_offset += max(1, min(10, chunk_size // 5))
+            
+            if verbose:
+                print(f"  Skipping region, advancing offsets")
     
     if verbose:
         print(f"\nCompleted minimal pair DTW with {len(all_pairs)} total pairs")
@@ -254,8 +281,8 @@ def _validate_pairs(template, query, pairs, tolerance=0.01):
     Validate DTW pairs by checking interval consistency.
     
     Args:
-        template: Template sequence
-        query: Query sequence  
+        template: Template sequence (numpy array expected)
+        query: Query sequence (numpy array expected)
         pairs: List of paired indices
         tolerance: Tolerance for interval consistency
         
@@ -263,28 +290,34 @@ def _validate_pairs(template, query, pairs, tolerance=0.01):
         bool: True if pairs are valid, False otherwise
     """
     if len(pairs) < 3:
-        # Not enough pairs to validate intervals
+        # Not enough pairs to validate intervals meaningfully
         return True
     
-    template = np.asarray(template)
-    query = np.asarray(query)
+    # Extract indices
+    template_indices = np.array([i for i, j in pairs])
+    query_indices = np.array([j for i, j in pairs])
     
-    # Extract matched values
-    template_vals = [template[i] for i, j in pairs]
-    query_vals = [query[j] for i, j in pairs]
+    # Extract matched values using numpy indexing
+    template_vals = template[template_indices]
+    query_vals = query[query_indices]
     
     # Calculate interval differences
     template_diffs = np.diff(template_vals)
     query_diffs = np.diff(query_vals)
+    
+    # Guard against empty diffs (shouldn't happen with len(pairs) >= 3, but be safe)
+    if len(template_diffs) == 0 or len(query_diffs) == 0:
+        return True
+    
     interval_diffs = query_diffs - template_diffs
     
     # Check if all intervals are within tolerance
     inconsistent = np.abs(interval_diffs) > tolerance
     
-    # Allow up to 10% of intervals to be inconsistent
+    # Allow up to VALIDATION_TOLERANCE_RATIO of intervals to be inconsistent
     inconsistent_ratio = np.sum(inconsistent) / len(interval_diffs)
     
-    return inconsistent_ratio <= 0.1
+    return inconsistent_ratio <= VALIDATION_TOLERANCE_RATIO
 
 
 def get_spikes_in_windows(spike_train, event_windows):
