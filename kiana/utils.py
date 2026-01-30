@@ -228,39 +228,38 @@ def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01,
         for i, j in chunk_pairs:
             all_pairs.append((position + i, position + j))
         
-        # Step 3: Get the relationship from the chunk pairs
-        # Calculate the average offset/ratio from chunk pairs
+        # Step 3: Determine where to start validating remaining data
         last_template_idx = chunk_pairs[-1][0]
         last_query_idx = chunk_pairs[-1][1]
         
-        # Step 4: Validate if this relationship holds for remaining data
-        remaining_template = template[position + last_template_idx + 1:]
-        remaining_query = query[position + last_query_idx + 1:]
-        
+        # Step 4: Validate if the pairing relationship holds for remaining data
         if verbose:
             print(f"  Last chunk pair: template[{last_template_idx}] -> query[{last_query_idx}]")
-            print(f"  Validating {len(remaining_template)} remaining template points")
+            remaining_count = len(template) - (position + last_template_idx + 1)
+            print(f"  Validating {remaining_count} remaining template points")
         
-        # Find where validation fails
-        failure_pos = _find_validation_failure(
-            template, query, all_pairs, 
+        # Find where validation fails and get additional validated pairs
+        failure_pos, validated_pairs = _find_validation_failure(
+            template, query, all_pairs.copy(),  # Pass a copy to avoid mutation
             position + last_template_idx + 1, 
             position + last_query_idx + 1,
             tolerance, verbose
         )
         
         if failure_pos is None:
-            # All remaining data validates! We're done
+            # All remaining data validates! Add validated pairs and we're done
+            all_pairs.extend(validated_pairs)
             if verbose:
                 print(f"  All remaining data validates successfully!")
             break
         else:
-            # Validation failed at failure_pos, restart from there
+            # Validation failed at failure_pos, add valid pairs up to failure point
+            all_pairs.extend([(i, j) for i, j in validated_pairs if i < failure_pos])
+            
             if verbose:
                 print(f"  Validation failed at position {failure_pos}, re-chunking from there")
             
-            # Remove pairs after failure point
-            all_pairs = [(i, j) for i, j in all_pairs if i < failure_pos]
+            # Restart from failure position
             position = failure_pos
     
     if verbose:
@@ -279,24 +278,27 @@ def _find_validation_failure(template, query, existing_pairs, start_template, st
     Args:
         template: Full template sequence
         query: Full query sequence  
-        existing_pairs: Existing validated pairs
+        existing_pairs: Existing validated pairs (not modified)
         start_template: Starting template index to validate from
         start_query: Starting query index to validate from
         tolerance: Tolerance for validation
         verbose: Print debug info
         
     Returns:
-        int: Template index where validation first fails, or None if all validates
+        tuple: (failure_position or None, list of validated pairs)
+               - failure_position: Template index where validation first fails, or None if all validates
+               - validated_pairs: List of newly validated pairs before any failure
     """
+    validated_pairs = []
+    
     if len(existing_pairs) < 2:
         # Not enough pairs to establish relationship
-        return None
+        return None, validated_pairs
     
     if start_template >= len(template):
-        return None  # No more data to validate
+        return None, validated_pairs  # No more data to validate
     
-    # Calculate the average time ratio from existing pairs
-    # This tells us how query time progresses relative to template time
+    # Calculate the time ratio from existing pairs
     template_indices = np.array([i for i, j in existing_pairs])
     query_indices = np.array([j for i, j in existing_pairs])
     
@@ -307,7 +309,7 @@ def _find_validation_failure(template, query, existing_pairs, start_template, st
     
     # Calculate time differences
     if len(recent_template) < 2:
-        return None
+        return None, validated_pairs
     
     template_span = recent_template[-1] - recent_template[0]
     query_span = recent_query[-1] - recent_query[0]
@@ -324,7 +326,7 @@ def _find_validation_failure(template, query, existing_pairs, start_template, st
     for template_idx in range(start_template, len(template)):
         if current_query_idx >= len(query):
             # Ran out of query data
-            return template_idx
+            return template_idx, validated_pairs
         
         # Predict query position based on template time and ratio
         template_time = template[template_idx]
@@ -332,11 +334,11 @@ def _find_validation_failure(template, query, existing_pairs, start_template, st
         
         # Find the closest query point
         # Search in a reasonable window around predicted position
-        search_start = max(start_query, current_query_idx - 5)
-        search_end = min(len(query), current_query_idx + 20)
+        search_start = max(start_query, current_query_idx)
+        search_end = min(len(query), search_start + 20)
         
         if search_start >= search_end:
-            return template_idx
+            return template_idx, validated_pairs
         
         query_window = query[search_start:search_end]
         query_times_diff = np.abs(query_window - predicted_query_time)
@@ -357,14 +359,14 @@ def _find_validation_failure(template, query, existing_pairs, start_template, st
                 print(f"    Validation failure at template[{template_idx}]: "
                       f"predicted query time {predicted_query_time:.3f}, "
                       f"actual {actual_query_time:.3f}, error {time_error:.3f}")
-            return template_idx
+            return template_idx, validated_pairs
         
         # Add this validated pair
-        existing_pairs.append((template_idx, actual_query_idx))
+        validated_pairs.append((template_idx, actual_query_idx))
         current_query_idx = actual_query_idx + 1
     
     # All validated successfully
-    return None
+    return None, validated_pairs
 
 
 def _validate_pairs(template, query, pairs, tolerance=0.01):
