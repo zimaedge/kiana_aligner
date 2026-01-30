@@ -119,9 +119,7 @@ def get_paired_ephys_event_index(task_ephys_dtw_pairs, conservative=False):
 
     return final_numpy_array
 
-# Constants for chunk processing
-MAX_OVERLAP = 5  # Maximum overlap between chunks to ensure continuity
-OVERLAP_RATIO = 0.1  # 10% of chunk_size as overlap
+# Constants for validation
 RETRY_GROWTH_FACTOR = 1.5  # Increase chunk size by 50% per retry
 VALIDATION_TOLERANCE_RATIO = 0.1  # Allow 10% inconsistent intervals
 
@@ -129,25 +127,25 @@ VALIDATION_TOLERANCE_RATIO = 0.1  # Allow 10% inconsistent intervals
 def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01, 
                               step_pattern="symmetric2", verbose=False, max_attempts=3):
     """
-    Minimal pair method for DTW alignment with chunked processing.
+    Minimal pair method for DTW alignment using forward sliding window approach.
     
     This method improves efficiency when dealing with long queues by:
-    1. Taking only a portion from the front of each queue at a time
-    2. Performing DTW pairing on these portions
-    3. Validating the pairing by checking interval consistency
-    4. If mismatch is found, re-pairing with adjusted chunk size
-    5. Processing incrementally until all data is paired
+    1. Processing the first chunk to establish pairing relationship
+    2. Validating if this relationship holds for remaining data
+    3. If validation fails at some point, re-chunk from that point
+    4. Continue forward until all data is processed
+    
+    This is a forward sliding window process, not block processing, 
+    avoiding overlap problems.
     
     Args:
         template: First sequence (reference), array of time points
         query: Second sequence (to be aligned), array of time points
-        chunk_size (int): Number of elements to process in each chunk. Default: 50
+        chunk_size (int): Number of elements to process in initial chunk. Default: 50
         tolerance (float): Tolerance for interval consistency check. Default: 0.01
         step_pattern (str): DTW step pattern. Default: "symmetric2"
         verbose (bool): Whether to print detailed information. Default: False
-        max_attempts (int): Maximum total number of attempts per chunk (including initial).
-                           For example, max_attempts=3 means 1 initial attempt + 2 retries.
-                           Default: 3
+        max_attempts (int): Maximum attempts to get valid chunk pairing. Default: 3
         
     Returns:
         list: List of paired indices in format [(template_idx, query_idx), ...]
@@ -162,118 +160,211 @@ def get_pair_via_dtw_minimal(template, query, chunk_size=50, tolerance=0.01,
     if len(template) <= chunk_size and len(query) <= chunk_size:
         return get_pair_via_dtw(template, query, step_pattern, verbose)
     
-    all_pairs = []
-    template_offset = 0
-    query_offset = 0
-    
     if verbose:
-        print(f"Starting minimal pair DTW with chunk_size={chunk_size}, tolerance={tolerance}")
+        print(f"Starting forward sliding window DTW with chunk_size={chunk_size}, tolerance={tolerance}")
         print(f"Template length: {len(template)}, Query length: {len(query)}")
     
-    while template_offset < len(template) and query_offset < len(query):
-        # Determine chunk boundaries with some extra context for better alignment
-        template_end = min(template_offset + chunk_size, len(template))
-        query_end = min(query_offset + chunk_size, len(query))
+    all_pairs = []
+    position = 0  # Current position in the sequences
+    
+    while position < len(template) and position < len(query):
+        # Step 1: Process a chunk starting from current position
+        chunk_end_template = min(position + chunk_size, len(template))
+        chunk_end_query = min(position + chunk_size, len(query))
         
-        # Ensure we have enough data for DTW (need at least 2 points)
-        if template_end - template_offset < 2 or query_end - query_offset < 2:
-            # Not enough data, skip to end
+        # Ensure we have enough data for DTW
+        if chunk_end_template - position < 2 or chunk_end_query - position < 2:
             break
         
-        # Extract chunks
-        template_chunk = template[template_offset:template_end]
-        query_chunk = query[query_offset:query_end]
+        template_chunk = template[position:chunk_end_template]
+        query_chunk = query[position:chunk_end_query]
         
         if verbose:
-            print(f"\nProcessing chunk: template[{template_offset}:{template_end}], query[{query_offset}:{query_end}]")
+            print(f"\nProcessing chunk from position {position}")
+            print(f"  Template: [{position}:{chunk_end_template}], Query: [{position}:{chunk_end_query}]")
         
-        # Perform DTW on chunk with retry logic
-        attempt = 0
-        chunk_valid = False
+        # Try to get valid pairing for this chunk with retries
+        chunk_pairs = None
         current_chunk_size = chunk_size
-        chunk_pairs = []
         
-        while attempt < max_attempts and not chunk_valid:
-            # Adjust chunk size for retry - increase size to get better context
+        for attempt in range(max_attempts):
             if attempt > 0:
-                # Increase chunk size by RETRY_GROWTH_FACTOR for each retry
+                # Retry with larger chunk
                 current_chunk_size = min(
-                    int(chunk_size * (RETRY_GROWTH_FACTOR ** attempt)), 
-                    len(template) - template_offset, 
-                    len(query) - query_offset
+                    int(chunk_size * (RETRY_GROWTH_FACTOR ** attempt)),
+                    len(template) - position,
+                    len(query) - position
                 )
-                template_end = min(template_offset + current_chunk_size, len(template))
-                query_end = min(query_offset + current_chunk_size, len(query))
+                chunk_end_template = min(position + current_chunk_size, len(template))
+                chunk_end_query = min(position + current_chunk_size, len(query))
                 
-                # Check if we still have enough data
-                if template_end - template_offset < 2 or query_end - query_offset < 2:
+                if chunk_end_template - position < 2 or chunk_end_query - position < 2:
                     break
-                    
-                template_chunk = template[template_offset:template_end]
-                query_chunk = query[query_offset:query_end]
+                
+                template_chunk = template[position:chunk_end_template]
+                query_chunk = query[position:chunk_end_query]
                 
                 if verbose:
-                    print(f"  Retry {attempt}: Adjusting chunk size to {current_chunk_size}")
+                    print(f"  Retry {attempt} with chunk_size={current_chunk_size}")
             
             # Get pairs for this chunk
             chunk_pairs = get_pair_via_dtw(template_chunk, query_chunk, step_pattern, verbose=False)
             
-            # Validate chunk pairs if we got any
-            if len(chunk_pairs) > 0:
-                chunk_valid = _validate_pairs(template_chunk, query_chunk, chunk_pairs, tolerance)
-            
+            # Validate chunk pairs
+            if len(chunk_pairs) > 0 and _validate_pairs(template_chunk, query_chunk, chunk_pairs, tolerance):
+                if verbose:
+                    print(f"  Chunk validation passed with {len(chunk_pairs)} pairs")
+                break
+            elif verbose:
+                print(f"  Chunk validation failed (attempt {attempt + 1})")
+        
+        if not chunk_pairs or len(chunk_pairs) == 0:
             if verbose:
-                if chunk_valid:
-                    print(f"  Validation passed with {len(chunk_pairs)} pairs")
-                elif len(chunk_pairs) == 0:
-                    print(f"  No pairs found for chunk (attempt {attempt + 1})")
-                else:
-                    print(f"  Validation failed (attempt {attempt + 1})")
-            
-            attempt += 1
+                print(f"  No valid pairs found, skipping position {position}")
+            position += max(1, chunk_size // 10)
+            continue
         
-        if not chunk_valid and verbose and len(chunk_pairs) > 0:
-            print(f"  Warning: Using result after {max_attempts} validation attempts")
+        # Step 2: Add chunk pairs to results (adjust to global indices)
+        for i, j in chunk_pairs:
+            all_pairs.append((position + i, position + j))
         
-        # Only process pairs if we got some
-        if len(chunk_pairs) > 0:
-            # Adjust indices to global coordinates and add to results
-            # For the first chunk, add all pairs
-            # For subsequent chunks, skip the first pair to avoid duplicates at boundaries
-            start_idx = 1 if len(all_pairs) > 0 else 0
-            
-            for i, j in chunk_pairs[start_idx:]:
-                global_i = template_offset + i
-                global_j = query_offset + j
-                all_pairs.append((global_i, global_j))
-            
-            # Update offsets for next iteration
-            # Move forward based on the last matched index in the chunk
-            last_template_idx, last_query_idx = chunk_pairs[-1]
-            
-            # Move forward but leave a small overlap to ensure continuity
-            overlap = min(MAX_OVERLAP, int(chunk_size * OVERLAP_RATIO))
-            
-            # Ensure we make progress by at least 1 element
-            # Add 1 to convert from index to count, then subtract overlap
-            template_step = max(1, last_template_idx + 1 - overlap)
-            query_step = max(1, last_query_idx + 1 - overlap)
-            
-            template_offset += template_step
-            query_offset += query_step
+        # Step 3: Get the relationship from the chunk pairs
+        # Calculate the average offset/ratio from chunk pairs
+        last_template_idx = chunk_pairs[-1][0]
+        last_query_idx = chunk_pairs[-1][1]
+        
+        # Step 4: Validate if this relationship holds for remaining data
+        remaining_template = template[position + last_template_idx + 1:]
+        remaining_query = query[position + last_query_idx + 1:]
+        
+        if verbose:
+            print(f"  Last chunk pair: template[{last_template_idx}] -> query[{last_query_idx}]")
+            print(f"  Validating {len(remaining_template)} remaining template points")
+        
+        # Find where validation fails
+        failure_pos = _find_validation_failure(
+            template, query, all_pairs, 
+            position + last_template_idx + 1, 
+            position + last_query_idx + 1,
+            tolerance, verbose
+        )
+        
+        if failure_pos is None:
+            # All remaining data validates! We're done
+            if verbose:
+                print(f"  All remaining data validates successfully!")
+            break
         else:
-            # If no pairs found even after retries, skip this region
-            # Move forward by a small amount to avoid infinite loop
-            template_offset += max(1, min(10, chunk_size // 5))
-            query_offset += max(1, min(10, chunk_size // 5))
-            
+            # Validation failed at failure_pos, restart from there
             if verbose:
-                print(f"  Skipping region, advancing offsets")
+                print(f"  Validation failed at position {failure_pos}, re-chunking from there")
+            
+            # Remove pairs after failure point
+            all_pairs = [(i, j) for i, j in all_pairs if i < failure_pos]
+            position = failure_pos
     
     if verbose:
-        print(f"\nCompleted minimal pair DTW with {len(all_pairs)} total pairs")
+        print(f"\nCompleted forward sliding window DTW with {len(all_pairs)} total pairs")
     
     return all_pairs
+
+
+def _find_validation_failure(template, query, existing_pairs, start_template, start_query, tolerance, verbose=False):
+    """
+    Find the first position where the established pairing relationship breaks down.
+    
+    Uses the existing pairs to predict where subsequent template points should map to,
+    and checks if the actual relationship holds.
+    
+    Args:
+        template: Full template sequence
+        query: Full query sequence  
+        existing_pairs: Existing validated pairs
+        start_template: Starting template index to validate from
+        start_query: Starting query index to validate from
+        tolerance: Tolerance for validation
+        verbose: Print debug info
+        
+    Returns:
+        int: Template index where validation first fails, or None if all validates
+    """
+    if len(existing_pairs) < 2:
+        # Not enough pairs to establish relationship
+        return None
+    
+    if start_template >= len(template):
+        return None  # No more data to validate
+    
+    # Calculate the average time ratio from existing pairs
+    # This tells us how query time progresses relative to template time
+    template_indices = np.array([i for i, j in existing_pairs])
+    query_indices = np.array([j for i, j in existing_pairs])
+    
+    # Get the slope from the last few pairs
+    n_pairs = min(10, len(existing_pairs))
+    recent_template = template[template_indices[-n_pairs:]]
+    recent_query = query[query_indices[-n_pairs:]]
+    
+    # Calculate time differences
+    if len(recent_template) < 2:
+        return None
+    
+    template_span = recent_template[-1] - recent_template[0]
+    query_span = recent_query[-1] - recent_query[0]
+    
+    if template_span == 0:
+        time_ratio = 1.0
+    else:
+        time_ratio = query_span / template_span
+    
+    # Now validate remaining points
+    # For each template point, predict where it should be in query
+    current_query_idx = start_query
+    
+    for template_idx in range(start_template, len(template)):
+        if current_query_idx >= len(query):
+            # Ran out of query data
+            return template_idx
+        
+        # Predict query position based on template time and ratio
+        template_time = template[template_idx]
+        predicted_query_time = query[query_indices[-1]] + (template_time - template[template_indices[-1]]) * time_ratio
+        
+        # Find the closest query point
+        # Search in a reasonable window around predicted position
+        search_start = max(start_query, current_query_idx - 5)
+        search_end = min(len(query), current_query_idx + 20)
+        
+        if search_start >= search_end:
+            return template_idx
+        
+        query_window = query[search_start:search_end]
+        query_times_diff = np.abs(query_window - predicted_query_time)
+        best_match_in_window = np.argmin(query_times_diff)
+        actual_query_idx = search_start + best_match_in_window
+        actual_query_time = query[actual_query_idx]
+        
+        # Check if this match is within tolerance
+        time_error = abs(actual_query_time - predicted_query_time)
+        
+        # Use relative tolerance
+        expected_diff = abs(template_time - template[template_indices[-1]]) * time_ratio
+        relative_tolerance = tolerance * max(1.0, expected_diff)
+        
+        if time_error > relative_tolerance:
+            # Validation failed at this position
+            if verbose:
+                print(f"    Validation failure at template[{template_idx}]: "
+                      f"predicted query time {predicted_query_time:.3f}, "
+                      f"actual {actual_query_time:.3f}, error {time_error:.3f}")
+            return template_idx
+        
+        # Add this validated pair
+        existing_pairs.append((template_idx, actual_query_idx))
+        current_query_idx = actual_query_idx + 1
+    
+    # All validated successfully
+    return None
 
 
 def _validate_pairs(template, query, pairs, tolerance=0.01):
