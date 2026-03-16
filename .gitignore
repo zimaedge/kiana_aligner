@@ -17,4 +17,8 @@ dist/
 wheels/
 data/
 
+<<<<<<< Updated upstream
+=======
+# 忽略测试文件夹
+>>>>>>> Stashed changes
 tests/

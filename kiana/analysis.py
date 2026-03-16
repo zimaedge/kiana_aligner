@@ -192,7 +192,7 @@ class SpikeTrainAnalyzer:
             initial_rate = counts / time_bin_size
             all_trial_rates.append(post_processor(initial_rate))
         self.rates_matrix = np.array(all_trial_rates)
-        print(f"Rates calculated via '{mode}' mode.")
+        logging.info(f"Rates calculated via '{mode}' mode.")
         return self
 
     # --- Private Generic Helpers ---

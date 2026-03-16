@@ -57,7 +57,7 @@ class EphysProcessor:
                 })
         return pd.DataFrame(parsed_list)
 
-    def load_and_merge_data(self):
+    def load_and_merge_data(self, data_col_id: int = -1):
         """加载、解析并合并时间和索引数据。"""
         time_dict_file, indice_dict_file = self._find_data_files()
 
@@ -71,8 +71,8 @@ class EphysProcessor:
         
         merged_data = pd.merge(time_data, indice_data, on=["filepath", "filename", "abs_start_time", "controller"])
 
-        merged_data["time"] = merged_data["time"].apply(lambda x: x[-1])
-        merged_data["indices"] = merged_data["indices"].apply(lambda x: x[-1])
+        merged_data["time"] = merged_data["time"].apply(lambda x: x[data_col_id])
+        merged_data["indices"] = merged_data["indices"].apply(lambda x: x[data_col_id])
         merged_data["diff_indice"] = merged_data["indices"].apply(lambda x: [x[i] - x[i-1] for i in range(1, len(x))])
         merged_data["num_timestamp"] = merged_data["time"].apply(len)
         merged_data["num_indice"] = merged_data["indices"].apply(len)
