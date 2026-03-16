@@ -112,6 +112,13 @@ class MatLoader(BaseLoader):
                     base_info.update(user_vars)
                     base_info.update(variable_changes)
 
+
+
+                # AnalogData提取
+                analog_data = trial_data.get('AnalogData', {})
+                if self.load_all:
+                    base_info.update(analog_data)
+                
                 def record_event(event_type, event_times):
                     for event_time in event_times:
                         record = base_info.copy()
@@ -122,9 +129,7 @@ class MatLoader(BaseLoader):
                             'AbsoluteDateTime': start_datetime + timedelta(seconds=event_time_sec)
                         })
                         all_records.append(record)
-
-                # AnalogData提取
-                analog_data = trial_data.get('AnalogData', {})
+                
                 touch_data = analog_data.get('Touch', np.array([]))
                 button_data = analog_data.get('Button', {})
                 if touch_data.size > 0:
