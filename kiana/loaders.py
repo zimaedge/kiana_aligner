@@ -193,6 +193,23 @@ class TrcLoader(BaseLoader):
 
         total_hand_points = kwargs.get('total_hand_points', 8)
         total_body_points = kwargs.get('total_body_points', 4)
+        body_name = kwargs.get('body_name', 'Body')
+        hand_name = kwargs.get('hand_name', [])
+        if type(hand_name) == list:
+            if len(hand_name) == 0:
+                total_hand_num = 1
+            else:
+                total_hand_num = len(hand_name)
+        elif type(hand_name) == str:
+            total_hand_num = 1
+            hand_name = [hand_name]
+        else:
+            raise ValueError("hand_name should be either a string or a list of strings or an empty list.")
+        if total_hand_num > 1 and type(total_hand_points) == int:
+                total_hand_points = [total_hand_points] * total_hand_num
+        elif total_hand_num == 1 and type(total_hand_points) == int:
+            total_hand_points = [total_hand_points]
+
         lines = []
         with open(file_name, 'r') as file:
             for line in file:
@@ -210,54 +227,84 @@ class TrcLoader(BaseLoader):
             elif len(split_lines[3][num_labeled_points]) > 0 and num_labeled_points > 1:
                 part.append(split_lines[3][num_labeled_points])
 
-        num_labeled_points = num_labeled_points+1
-        logging.info(f"num of labeled points: {num_labeled_points}")
+        num_labeled_points = num_labeled_points-2
+        logging.info(f"num of labeled recorded points: {num_labeled_points}")
         logging.info(f"length of part: {len(part)}")
         for i in range(len(part)):
             logging.info(f"part{i+1}:{part[i]}")
 
         data = np.array(split_lines[6:]).astype(np.float32)
         columns = ["frame", "time"] + split_lines[4][:num_labeled_points]
-        rec = pd.DataFrame(data, columns=columns)
+        rec = pd.DataFrame(data[:,:num_labeled_points+2], columns=columns)
         rec["time"] = rec["time"]-rec["time"].values[0]
 
+        sum_temp_all = np.array([np.sum(np.hstack((rec[f"X{i+1}"].values,rec[f"Y{i+1}"].values,rec[f"Z{i+1}"].values))) for i in range(int((rec.shape[1]-2)/3))])
+        idx_to_traverse = np.where(sum_temp_all != 0)[0]
         column_idx_with_data_hand = []
         column_idx_with_data_body = []
-        for i in range(int((rec.shape[1]-2)/3)):
-            sum_temp = np.sum(np.hstack((rec[f"X{i+1}"].values,rec[f"Y{i+1}"].values,rec[f"Z{i+1}"].values)))
-            if sum_temp != 0:
-                if "Body" in part[i]:
-                    column_idx_with_data_body.append(i+1)
-                else:
+        for i in idx_to_traverse:
+            if body_name in part[i]:
+                column_idx_with_data_body.append(i+1)
+
+        if total_hand_num == 1:
+            for i in idx_to_traverse:
+                if (body_name not in part[i]) and (len(hand_name)==0):
                     column_idx_with_data_hand.append(i+1)
+        elif total_hand_num > 1:
+            for j in range(total_hand_num):
+                hand_j = []
+                for i in idx_to_traverse:
+                    if (body_name not in part[i]) and (hand_name[j] in part[i]):
+                        hand_j.append(i+1)
+                hand_j = sorted(hand_j)
+                if check and (len(hand_j) != total_hand_points[j]):
+                    raise ValueError(f"Number of detected hand points for {hand_name[j]} ({len(hand_j)}) does not match expected ({total_hand_points[j]}).")
+                column_idx_with_data_hand.append(hand_j)
 
         if check:
-            if len(column_idx_with_data_hand) != total_hand_points:
+            if (total_hand_num == 1) and (len(column_idx_with_data_hand) != total_hand_points[0]):
                 raise ValueError(f"Number of detected hand points ({len(column_idx_with_data_hand)}) does not match expected ({total_hand_points}).")
             if len(column_idx_with_data_body) != total_body_points:
                 raise ValueError(f"Number of detected body points ({len(column_idx_with_data_body)}) does not match expected ({total_body_points}).")
 
-        chosen_points = np.array(column_idx_with_data_hand)
-        if len(column_idx_with_data_hand) == 0:
-            chosen_points = np.array([1])
         trigger_points = np.array(column_idx_with_data_body)
-
-        chosen_columns = np.array([[f"X{i}",f"Y{i}",f"Z{i}"] for i in chosen_points]).reshape([1,-1])
         trigger_columns = np.array([[f"X{i}",f"Y{i}",f"Z{i}"] for i in trigger_points]).reshape([1,-1])
-
-        for i in range(len(chosen_points)):
-            logging.info(f"Choose point {chosen_points[i]} as {part[chosen_points[i]-1]}")
-        logging.info(chosen_columns)
         for i in range(len(trigger_points)):
             logging.info(f"Choose point {trigger_points[i]} as {part[trigger_points[i]-1]}")
         logging.info(trigger_columns)
 
-        hand_traj = pd.DataFrame()
-        hand_traj['time'] = rec['time']
-        hand_traj['frame'] = rec['frame']
-        for i,item in enumerate(chosen_columns):
-            hand_traj[item] = rec[item]
-            
+        if total_hand_num == 1:
+            chosen_points = np.array(column_idx_with_data_hand)
+            if len(column_idx_with_data_hand) == 0:
+                chosen_points = np.array([1])
+            chosen_columns = np.array([[f"X{i}",f"Y{i}",f"Z{i}"] for i in chosen_points]).reshape([1,-1])
+            for i in range(len(chosen_points)):
+                logging.info(f"Choose point {chosen_points[i]} as {part[chosen_points[i]-1]}")
+            logging.info(chosen_columns)
+
+            hand_traj = pd.DataFrame()
+            hand_traj['time'] = rec['time']
+            hand_traj['frame'] = rec['frame']
+            for i,item in enumerate(chosen_columns):
+                hand_traj[item] = rec[item]
+
+        else:
+            chosen_points = [np.array(column_idx_with_data_hand[i]) for i in range(total_hand_num)]
+            if len(column_idx_with_data_hand) == 0:
+                raise ValueError("No hand points detected, but total_hand_pt_num > 1. Please check your data and configuration.")
+            chosen_columns = [np.array([[f"X{i}",f"Y{i}",f"Z{i}"] for i in chosen_points[j]]).reshape([1,-1]) for j in range(total_hand_num)]
+            for i in range(len(chosen_points)):
+                for j in range(len(chosen_points[i])):
+                    logging.info(f"Choose point {chosen_points[i][j]} as {part[chosen_points[i][j]-1]}")
+            logging.info(chosen_columns)
+
+            hand_traj = pd.DataFrame()
+            hand_traj['time'] = rec['time']
+            hand_traj['frame'] = rec['frame']
+            for single_hand in chosen_columns:
+                for item in single_hand:
+                    hand_traj[item] = rec[item]
+
         trigger_df = pd.DataFrame()
         trigger_df['time'] = rec['time']
         trigger_df['frame'] = rec['frame']
@@ -288,8 +335,8 @@ class TrcLoader(BaseLoader):
                 tp = trigger_df["time"].values[i] - trigger_df["time"].values[step_temp] + 1.0/float(config["DataRate"])
                 dict_temp["length"] = f"{tp:.4f}"
                 continous_trigger.append(dict_temp)
-                trigger_df.loc[step_temp, "label"] = "Trigger Onset"
-                trigger_df.loc[i, "label"] = "Trigger Offset"
+                trigger_df.loc[step_temp, "label"] = "Trigger_Onset"
+                trigger_df.loc[i, "label"] = "Trigger_Offset"
                 flag = 0
 
         logging.info(continous_trigger)
@@ -301,6 +348,7 @@ class TrcLoader(BaseLoader):
             df = pd.merge(hand_traj, trigger_df, on=['time', 'frame'])
 
         df = df.rename(columns={'time': 'EventTime'})
+        df['AbsoluteDateTime'] = pd.NaT
 
         return df
 
