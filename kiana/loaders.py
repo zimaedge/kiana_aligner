@@ -248,8 +248,9 @@ class TrcLoader(BaseLoader):
 
         if total_hand_num == 1:
             for i in idx_to_traverse:
-                if (body_name not in part[i]) and (len(hand_name)==0):
-                    column_idx_with_data_hand.append(i+1)
+                if (body_name not in part[i]): 
+                    if (len(hand_name)==0) or (hand_name[0] in part[i]):
+                        column_idx_with_data_hand.append(i+1)
         elif total_hand_num > 1:
             for j in range(total_hand_num):
                 hand_j = []
