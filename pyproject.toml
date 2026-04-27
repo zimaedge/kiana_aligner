@@ -15,7 +15,7 @@ dependencies = [
     "pandas>=2.2.3",
     "matplotlib",
     "scipy",
-    "dtw-python",
+    "dtw-python<=1.5.3",
 ]
 requires-python = ">=3.8"
 
