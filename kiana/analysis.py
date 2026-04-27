@@ -83,14 +83,17 @@ class SpikeTrainAnalyzer:
     
     def _precompute_relative_events(self):
         self.relative_events = {}
-        for event_name, event_times in self.default_events.items():
-            relative_event_times = []
-            for i in range(self.num_trials):
-                trial_start = self.event_windows[i, 0]
-                trial_end = self.event_windows[i, 1]
-                trial_event_times = event_times[(event_times >= trial_start) & (event_times < trial_end)]
-                relative_event_times.append(trial_event_times - self.align_points[i])
-            self.relative_events[event_name] = relative_event_times
+        if self.default_events is None: 
+            return
+        else:
+            for event_name, event_times in self.default_events.items():
+                relative_event_times = []
+                for i in range(self.num_trials):
+                    trial_start = self.event_windows[i, 0]
+                    trial_end = self.event_windows[i, 1]
+                    trial_event_times = event_times[(event_times >= trial_start) & (event_times < trial_end)]
+                    relative_event_times.append(trial_event_times - self.align_points[i])
+                self.relative_events[event_name] = relative_event_times
 
     def _determine_time_window(self, analysis_window=None):
         if analysis_window is None:
